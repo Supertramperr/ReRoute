@@ -25,3 +25,11 @@ Build/
 **/run.log
 **/*.cookies
 /tmp/*.cookies
+
+# ReRoute local backups/artifacts
+.bak/
+Sources/_backups/
+Sources/**/*.bak*
+Sources/**/*.restored*
+Sources/**/*.cookies
+Sources/**/run.log
