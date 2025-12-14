@@ -1,0 +1,241 @@
+import SwiftUI
+struct CancelPulseLabel: View {
+    let seconds: Int
+    @State private var pulse = false
+
+    var body: some View {
+        Text(seconds > 0 ? "Cancel (\(seconds))" : "Cancel")
+            .fontWeight(.semibold)
+            .opacity(pulse ? 1.0 : 0.86)
+            .scaleEffect(pulse ? 1.03 : 1.0)
+            .animation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true), value: pulse)
+            .onAppear { pulse = true }
+    }
+}
+import AppKit
+
+struct RootMenuView: View {
+    @EnvironmentObject var model: AppModel
+
+    private enum Screen { case main, more }
+    @State private var screen: Screen = .main
+
+    @State private var showConfirmReboot = false
+
+    var body: some View {
+        ZStack {
+            switch screen {
+            case .main:
+                mainView
+                    .transition(.opacity.combined(with: .scale(scale: 0.995)))
+            case .more:
+                MoreView(onBack: { screen = .main })
+                    .environmentObject(model)
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: screen)
+    }
+
+    private var mainView: some View {
+        VStack(spacing: 10) {
+            MenuSection {
+                MenuRow(title: "Reboot Now…", systemImage: "arrow.clockwise") {
+                    if model.internet == .offline {
+                        showConfirmReboot = true
+                    } else if model.askConfirmRebootNow {
+                        showConfirmReboot = true
+                    } else {
+                        graceLog("CLICK")
+                        model.rebootNow(debugMode: false)
+                    }
+                }
+                .disabled(model.operation != .idle)
+
+            if model.operation == .starting {
+                    MenuRow(
+                        title: (model.startingCountdown > 0
+                                ? "Cancel (\(model.startingCountdown))"
+                                : ""),
+                        systemImage: "xmark.circle"
+                    ) {
+                        model.cancel()
+                    }
+                    .reroutePulse(model.operation == .starting)
+                }
+            }
+
+            Divider().opacity(0.5)
+
+            // Grace cancel window (fixed-end timestamp; no restarts)
+        .padding(14)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.25), radius: 18, x: 0, y: 8)
+        .overlay {
+            if showConfirmReboot {
+                GlassConfirmDialog(
+                    title: "Reboot Router",
+                    subtitle: "http://\(model.routerHost) • Internet: \(model.internet.rawValue)",
+                    bullets: [
+                        "Internet may be unavailable briefly.",
+                        "We’ll verify connectivity after reboot."
+                    ],
+                    warning: (model.internet == .offline) ? "Internet is currently Offline." : nil,
+                    showDontAskAgain: true,
+                    dontAskAgainValue: $model.askConfirmRebootNow.mapNegated(),
+                    primaryTitle: "Reboot",
+                    primaryDestructive: true,
+                    onPrimary: {
+                        showConfirmReboot = false
+                        model.rebootNow(debugMode: false)
+                    },
+                    onCancel: { showConfirmReboot = false }
+                )
+            }
+        }
+    }
+}
+
+private struct MenuSection<Content: View>: View {
+    @ViewBuilder var content: Content
+    var body: some View { VStack(spacing: 6) { content } }
+}
+
+private struct MenuRow: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage).frame(width: 18)
+                Text(title)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MenuRowStyle())
+        .keyboardShortcutIf(shortcutKey(), modifiers: .command)
+    }
+
+    private func shortcutKey() -> KeyEquivalent? {
+        if title.hasPrefix("Reboot") { return "r" }
+        if title == "Quit" { return "q" }
+        return nil
+    }
+}
+
+private struct MenuRowDisclosure: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage).frame(width: 18)
+                Text(title)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .opacity(0.55)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MenuRowStyle())
+    }
+}
+
+private struct MenuRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .background(configuration.isPressed ? Color.white.opacity(0.08) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+}
+
+private extension Binding where Value == Bool {
+    func mapNegated() -> Binding<Bool> {
+        Binding<Bool>(get: { !wrappedValue }, set: { wrappedValue = !$0 })
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func keyboardShortcutIf(_ key: KeyEquivalent?, modifiers: EventModifiers) -> some View {
+        if let key { self.keyboardShortcut(key, modifiers: modifiers) } else { self }
+    }
+}
+
+
+
+private struct ReRoutePulse: ViewModifier {
+    let enabled: Bool
+    @State private var pulse = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(enabled ? (pulse ? 1.0 : 0.86) : 1.0)
+            .scaleEffect(enabled ? (pulse ? 1.03 : 1.0) : 1.0)
+            .animation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true), value: pulse)
+            .onAppear {
+                pulse = enabled
+            }
+            .onChange(of: enabled) { v in
+                pulse = v
+            }
+    }
+}
+
+private extension View {
+    func reroutePulse(_ enabled: Bool) -> some View {
+        self.modifier(ReRoutePulse(enabled: enabled))
+    }
+}
+
+
+
+private func graceLog(_ msg: String) {
+    // Mirrors your existing run.log format (ISO8601 Z)
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let line = "\(iso.string(from: Date())) GRACE " + msg + "\n"
+    let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+    let logURL = dir.appendingPathComponent("router-reboot").appendingPathComponent("run.log")
+    try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    if let data = line.data(using: .utf8) {
+        if let h = try? FileHandle(forWritingTo: logURL) {
+            try? h.seekToEnd()
+            try? h.write(contentsOf: data)
+            try? h.close()
+        } else {
+            try? data.write(to: logURL, options: .atomic)
+        }
+    }
+}
+
+
+private struct GracePulse: ViewModifier {
+    let active: Bool
+    @State private var on = false
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(active && on ? 1.02 : 1.0)
+            .opacity(active && on ? 1.0 : 0.88)
+            .onAppear {
+                guard active else { return }
+                withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) { on = true }
+            }
+            .onDisappear { on = false }
+    }
+}

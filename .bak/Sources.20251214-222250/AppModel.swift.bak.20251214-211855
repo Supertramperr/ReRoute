@@ -1,0 +1,452 @@
+import Foundation
+import SwiftUI
+import Network
+import AppKit
+
+@MainActor
+final class AppModel: ObservableObject {
+
+    // Ensure UI-driving state changes happen on the main thread
+    private func ui(_ f: @escaping () -> Void) {
+        if Thread.isMainThread {
+            f()
+        } else {
+            DispatchQueue.main.async { f() }
+        }
+    }
+
+
+    enum InternetStatus: String {
+        case online = "Online"
+        case offline = "Offline"
+        case unknown = "Unknown"
+    }
+
+    enum Operation: Equatable {
+            case starting
+case idle
+        case rebooting
+        case verifying
+        case failed(String)
+        case cancelled
+
+        var label: String {
+            switch self {
+            case .idle: return "Idle"
+            case .rebooting: return "Rebooting"
+            case .verifying: return "Verifying"
+            case .failed: return "Failed"
+            case .cancelled: return "Cancelled"
+            }
+        }
+
+        var isRunning: Bool {
+            switch self {
+            case .rebooting, .verifying: return true
+            default: return false
+            }
+        }
+    }
+
+    // Settings (minimal; can extend later)
+    @AppStorage("router_host") var routerHost: String = "192.168.1.1"
+    @AppStorage("router_username") var routerUsername: String = "admin"
+    @AppStorage("ask_confirm_reboot_now") var askConfirmRebootNow: Bool = true
+    @AppStorage("notify_when_back") var notifyWhenBack: Bool = true
+    @AppStorage("open_terminal_debug") var openTerminalDebug: Bool = true
+
+    // NOTE: password is stored in plaintext for now; can switch to Keychain next.
+    @AppStorage("router_password") var routerPassword: String = "admin"
+
+    @Published var internet: InternetStatus = .unknown
+    @Published var operation: Operation = .idle
+
+    /// 0.0 - 1.0
+    @Published var progress: Double = 0
+    @Published var lastSuccessAt: Date? = nil
+    @Published var estimatedRebootSeconds: Double = 109.0
+    @Published var lastUpdate: Date? = nil
+    @Published var lastReboot: Date? = nil
+    @Published var lastError: String? = nil
+
+    private let log = AppLog()
+    private var rebootTask: Task<Void, Never>? = nil
+
+    private let router = RouterClient()
+    private let internetProbe = InternetProbe()
+
+    init() {
+        self.estimatedRebootSeconds = loadEstimateSeconds()
+        internetProbe.onUpdate = { [weak self] status in
+            Task { @MainActor in
+                self?.internet = status ? .online : .offline
+                self?.touch()
+            }
+        }
+        internetProbe.start()
+    }
+
+    func touch() { lastUpdate = Date() }
+
+    func canCancel() -> Bool { operation.isRunning }
+
+    func cancel() {
+        rebootTask?.cancel()
+        rebootTask = nil
+            ui { self.operation = .cancelled; self.touch() }
+        lastError = nil
+            ui { self.progress = 0; self.touch() }
+        log.write("CANCEL requested by user")
+    }
+
+    func rebootNow(debugMode: Bool) {
+        guard operation == .idle else { return }
+
+        lastError = nil
+        operation = .rebooting
+            ui { self.progress = 0.05; self.touch() }
+        if debugMode, openTerminalDebug {
+            TerminalHelper.openTail(logFilePath: log.filePath)
+        }
+
+        rebootTask = Task { await runReboot(debugMode: debugMode) }
+    }
+
+    private func runReboot(debugMode: Bool) async {
+        do {
+            log.write("START (debug=\(debugMode))")
+
+            ui { self.operation = .starting; self.progress = 0.0; self.touch() }
+            // Arming window (cancelable before the reboot POST is sent)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let host = routerHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            let user = routerUsername
+            let pass = routerPassword
+
+            // ---- curl-equivalent reboot flow (single session + cookies) ----
+            let config = URLSessionConfiguration.default
+            config.httpShouldSetCookies = true
+            config.httpCookieAcceptPolicy = .always
+            config.httpCookieStorage = HTTPCookieStorage.shared
+            config.requestCachePolicy = .reloadIgnoringLocalCacheData
+            config.urlCache = nil
+            let session = URLSession(configuration: config)
+
+            func extractSessionKey(from html: String) throws -> String {
+                let r = try NSRegularExpression(pattern: #"var\s+sessionkey\s*=\s*'([0-9]+)'"#, options: [])
+                let range = NSRange(html.startIndex..<html.endIndex, in: html)
+                if let m = r.firstMatch(in: html, options: [], range: range),
+                   let g1 = Range(m.range(at: 1), in: html) {
+                    return String(html[g1])
+                }
+                throw NSError(domain: "ReRoute", code: -10, userInfo: [NSLocalizedDescriptionKey: "sessionKey not found in HTML"])
+            }
+
+            func getHTML(_ url: URL, timeout: TimeInterval = 8) async throws -> String {
+                var req = URLRequest(url: url)
+                req.httpMethod = "GET"
+                req.timeoutInterval = timeout
+                req.cachePolicy = .reloadIgnoringLocalCacheData
+                req.setValue("ReRoute", forHTTPHeaderField: "User-Agent")
+                let (data, resp) = try await session.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                let text = String(data: data, encoding: .utf8) ?? ""
+                if code < 200 || code >= 400 {
+                    let head = String(text.prefix(200))
+                    throw NSError(domain: "ReRoute", code: code, userInfo: [NSLocalizedDescriptionKey: "GET \(url.path) http=\(code) head=\(head)"])
+                }
+                return text
+            }
+
+            func postForm(_ url: URL, referer: URL, body: String, timeout: TimeInterval = 12) async throws -> (Int, String) {
+                var req = URLRequest(url: url)
+                req.httpMethod = "POST"
+                req.timeoutInterval = timeout
+                req.cachePolicy = .reloadIgnoringLocalCacheData
+                req.httpBody = body.data(using: .utf8)
+
+                let origin = "\(url.scheme ?? "http")://\(url.host ?? "")"
+                req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                req.setValue(origin, forHTTPHeaderField: "Origin")
+                req.setValue(referer.absoluteString, forHTTPHeaderField: "Referer")
+                req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+                req.setValue("ReRoute", forHTTPHeaderField: "User-Agent")
+
+                let (data, resp) = try await session.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                let text = String(data: data, encoding: .utf8) ?? ""
+                return (code, text)
+            }
+
+            let base = URL(string: "http://\(host)/")!
+            ui { self.progress = 0.10; self.touch() }
+            log.write("GET / (login page)")
+
+            let loginHTML = try await getHTML(base)
+            let loginKey = try extractSessionKey(from: loginHTML)
+            log.write("loginKey=\(loginKey)")
+            try Task.checkCancellation()
+            ui { self.progress = 0.20; self.touch() }
+            log.write("POST postlogin.cgi")
+
+            let loginURL = URL(string: "http://\(host)/postlogin.cgi?sessionKey=\(loginKey)")!
+            let loginBody = "sessionKey=\(loginKey)&loginUsername=\(user)&loginPassword=\(pass)"
+            let (loginCode, loginResp) = try await postForm(loginURL, referer: base, body: loginBody)
+            log.write("postlogin http=\(loginCode) head=\(String(loginResp.prefix(120)))")
+            try Task.checkCancellation()
+            ui { self.progress = 0.30; self.touch() }
+            log.write("GET securite-pb1-motdepasse.html (auth key)")
+
+            let secURL = URL(string: "http://\(host)/securite-pb1-motdepasse.html")!
+            let secHTML = try await getHTML(secURL)
+            let authKey = try extractSessionKey(from: secHTML)
+            log.write("authKey=\(authKey)")
+            try Task.checkCancellation()
+            ui { self.progress = 0.40; self.touch() }
+            log.write("POST rebootinfo.cgi")
+
+            let rebootURL = URL(string: "http://\(host)/rebootinfo.cgi?sessionKey=\(authKey)")!
+            let rebootBody = "sessionKey=\(authKey)"
+            let (rebootCode, rebootResp) = try await postForm(rebootURL, referer: secURL, body: rebootBody)
+            let rebootHead = String(rebootResp.prefix(220))
+            log.write("rebootinfo http=\(rebootCode) head=\(rebootHead)")
+
+            // If router returns login form (still 200), treat as failure.
+            let lower = rebootResp.lowercased()
+            if rebootCode != 200 || lower.contains("postlogin.cgi") || lower.contains("loginusername") {
+                throw NSError(domain: "ReRoute", code: -20, userInfo: [NSLocalizedDescriptionKey: "reboot rejected (login page or bad status). http=\(rebootCode)"])
+            }
+            // ---- end curl-equivalent reboot flow ----
+            ui { self.operation = .rebooting; self.touch() }
+            
+            log.write("monitoring ping+wan")
+
+            // Estimated duration (seconds) for linear progress
+            let estimated = max(30.0, min(240.0, loadEstimateSeconds()))
+            ui { self.estimatedRebootSeconds = estimated; self.touch() }
+
+            let startTime = Date()
+
+            // Linear progress ticker: 0 -> 1 over estimated seconds
+            let progressTask = Task.detached(priority: .utility) { [weak self] in
+                guard let self else { return }
+                while !Task.isCancelled {
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    let p = min(1.0, max(0.0, elapsed / estimated))
+                    self.ui { self.progress = p; self.touch() }
+                    try? await Task.sleep(nanoseconds: 250_000_000) // 0.25s
+                }
+            }
+
+            // Router ping & WAN probe thresholds
+            let routerDownThreshold = 3
+            let routerUpThreshold = 2
+            let wanDownThreshold = 2
+            let wanUpThreshold = 2
+
+            var routerDownSeen = false
+            var routerUpSeen = false
+            var wanDownSeen = false
+            var wanUpSeen = false
+
+            var rFail = 0, rOk = 0
+            var wFail = 0, wOk = 0
+
+            // Stay in rebooting until router is back, then verifying until WAN is back
+            ui { self.operation = .rebooting; self.touch() }
+
+            var observedWanUpAt: Date? = nil
+
+            for i in 1...240 {
+                try Task.checkCancellation()
+
+                // Router ping (every 1s)
+                let pingOK = await PingProbe.pingOnce(host: host, timeoutMs: 1000)
+                if pingOK { rOk += 1; rFail = 0 } else { rFail += 1; rOk = 0 }
+
+                if !routerDownSeen && rFail >= routerDownThreshold {
+                    routerDownSeen = true
+                    log.write("ROUTER_DOWN at i=\(i)")
+                }
+                if routerDownSeen && !routerUpSeen && rOk >= routerUpThreshold {
+                    routerUpSeen = true
+                    log.write("ROUTER_UP at i=\(i)")
+                    ui { self.operation = .verifying; self.touch() }
+                }
+
+                // WAN probe (every 2s)
+                if i % 2 == 0 {
+                    let wanOK = await wanIsUp()
+                    if wanOK { wOk += 1; wFail = 0 } else { wFail += 1; wOk = 0 }
+
+                    if !wanDownSeen && wFail >= wanDownThreshold {
+                        wanDownSeen = true
+                        ui { self.internet = .offline; self.touch() }
+                        log.write("WAN_DOWN at i=\(i)")
+                    }
+                    if wanDownSeen && !wanUpSeen && wOk >= wanUpThreshold {
+                        wanUpSeen = true
+                        observedWanUpAt = Date()
+                        ui { self.internet = .online; self.touch() }
+                        log.write("WAN_UP at i=\(i)")
+                    }
+                }
+
+                // Success condition:
+                // router is back AND WAN is back
+                if routerUpSeen && wanUpSeen {
+                    break
+                }
+
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+
+            progressTask.cancel()
+
+            let confirmed = routerUpSeen && wanUpSeen
+            log.write("DONE (confirmed=\(confirmed)) routerUp=\(routerUpSeen) wanUp=\(wanUpSeen)")
+
+            if confirmed {
+                ui {
+                    self.operation = .idle
+                    self.progress = 1.0
+                    self.lastSuccessAt = Date()
+                    self.lastReboot = Date()
+                    self.touch()
+                }
+                // Update EMA estimate from measured duration (to WAN_UP)
+                let measured = (observedWanUpAt ?? Date()).timeIntervalSince(startTime)
+                updateEstimateSeconds(with: measured)
+            } else {
+                ui {
+                    self.operation = .failed("Timeout waiting for WAN/router")
+                    self.touch()
+                }
+            }
+if notifyWhenBack {
+                NotificationHelper.notify(
+                    title: "Router reboot",
+                    body: upSeen ? "Confirmed (down→up)." : "Request sent; not confirmed within timeout."
+                )
+            }
+        } catch is CancellationError {
+            log.write("CANCELLED (task)")
+            ui { self.operation = .cancelled; self.touch() }
+            ui { self.progress = 0; self.touch() }
+        } catch {
+            log.write("ERROR: \(error)")
+            ui { self.operation = .failed(error.localizedDescription); self.touch() }
+            lastError = error.localizedDescription
+            ui { self.progress = 0; self.touch() }
+            NotificationHelper.notify(title: "Router reboot failed", body: error.localizedDescription)
+        }
+
+        rebootTask = nil
+    }
+
+    func openRouterUI() {
+        guard let url = URL(string: "http://\(routerHost)/") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func openLog() {
+        let url = URL(fileURLWithPath: log.filePath)
+        NSWorkspace.shared.open(url)
+    }
+
+    func openSettingsWindow() {
+        WindowManager.shared.showSettings(model: self)
+    }
+
+    func openAboutWindow() {
+        WindowManager.shared.showAbout()
+    }
+
+    func copyDiagnostics() {
+        let text = """
+        Router host: \(routerHost)
+        Internet: \(internet.rawValue)
+        Operation: \(operation.label)
+        Progress: \(Int((progress * 100).rounded()))%
+        Last update: \(lastUpdate?.description ?? "n/a")
+        Last reboot: \(lastReboot?.description ?? "n/a")
+        Error: \(lastError ?? "n/a")
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+    var menuSymbolName: String {
+        // Success pulse for ~5 seconds after completion
+        if let t = lastSuccessAt, Date().timeIntervalSince(t) < 5.0 {
+            return "checkmark.circle"
+        }
+
+        switch operation {
+        case .starting:
+            return "hourglass"
+        case .rebooting:
+            return "arrow.clockwise"
+        case .verifying:
+            return "antenna.radiowaves.left.and.right"
+        case .failed:
+            return "exclamationmark.triangle"
+        case .cancelled:
+            return "xmark.circle"
+        default:
+            switch internet {
+            case .online:  return "wifi"
+            case .offline: return "wifi.slash"
+            default:       return "wifi.exclamationmark"
+            }
+        }
+    }
+        }
+    }
+
+
+
+    private let Key_rebootEMA = "reroute.rebootEMASeconds"
+    private let Key_rebootCount = "reroute.rebootCount"
+
+    private func loadEstimateSeconds() -> Double {
+        let v = UserDefaults.standard.double(forKey: Key_rebootEMA)
+        return v > 0 ? v : 109.0
+    }
+
+    private func updateEstimateSeconds(with measured: Double) {
+        let clamped = max(30.0, min(240.0, measured))
+        let prev = loadEstimateSeconds()
+        let alpha = 0.20
+        let next = alpha * clamped + (1.0 - alpha) * prev
+        UserDefaults.standard.set(next, forKey: Key_rebootEMA)
+
+        let c = UserDefaults.standard.integer(forKey: Key_rebootCount)
+        UserDefaults.standard.set(c + 1, forKey: Key_rebootCount)
+
+        ui { self.estimatedRebootSeconds = next; self.touch() }
+    }
+
+    private func wanIsUp() async -> Bool {
+        guard let url = URL(string: "https://clients3.google.com/generate_204") else { return false }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.timeoutInterval = 2.5
+
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        cfg.urlCache = nil
+        cfg.httpShouldSetCookies = false
+        cfg.timeoutIntervalForRequest = 2.5
+        cfg.timeoutIntervalForResource = 2.5
+
+        do {
+            let (_, resp) = try await URLSession(configuration: cfg).data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            return code == 204
+        } catch {
+            return false
+        }
+    }
+
+}

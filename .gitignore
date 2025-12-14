@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Xcode
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+xcuserdata/
+*.moved-aside
+*.swp
+*.orig
+
+# Build products
+build/
+Build/
+*.app
+*.dSYM
+
+# SwiftPM
+.build/
+
+# Your app caches/logs
+**/Library/Caches/router-reboot/
+**/run.log
+**/*.cookies
+/tmp/*.cookies

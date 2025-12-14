@@ -1,0 +1,221 @@
+import SwiftUI
+
+import SwiftUI
+
+// Starting… shimmer bar (full-width)
+struct StartingShimmerBar: View {
+    var height: CGFloat = 10
+    var cornerRadius: CGFloat = 6
+
+    var body: some View {
+        GeometryReader { geo in
+            TimelineView(.animation) { ctx in
+                let t = ctx.date.timeIntervalSinceReferenceDate
+                let cycle = 1.2
+                let phase = (t.truncatingRemainder(dividingBy: cycle)) / cycle // 0..1
+
+                let w = max(1, geo.size.width)
+                let highlightW = max(80, w * 0.45)
+                let startX = -highlightW
+                let endX = w + highlightW
+                let x = startX + (endX - startX) * phase
+
+                ZStack {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
+                        )
+
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .clear, location: 0.00),
+                                    .init(color: Color.white.opacity(0.26), location: 0.50),
+                                    .init(color: .clear, location: 1.00),
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: highlightW, height: height)
+                        .offset(x: (x - w/2))
+                        .blendMode(.screen)
+                        .opacity(0.95)
+                        .mask(
+                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                .frame(width: w, height: height)
+                        )
+                }
+            }
+        }
+        .frame(height: height)
+        .frame(maxWidth: CGFloat.infinity)
+    }
+}
+struct StatusBlockView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Status")
+                    .font(.headline)
+                Spacer()
+                InternetPill(status: model.internet)
+            }
+
+            HStack {
+                Text("Operation:")
+                    .foregroundStyle(.secondary)
+                Text(model.operation.label)
+                    .fontWeight(.semibold)
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Progress:")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(pct)%")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Group {
+                    if model.operation == .starting {
+                        StartingShimmerBar().frame(maxWidth: CGFloat.infinity)
+                                        if model.operation != .idle {
+                                            let total = max(1.0, model.estimatedRebootSeconds)
+                                            let remaining = max(0, Int(ceil((1.0 - model.progress) * total)))
+                                            Text("Est. remaining: \(remaining)s")
+                                                .font(.system(size: 11))
+                                                .opacity(0.72)
+                                        }
+                    } else {
+                        Group {
+                    if model.operation == .starting {
+                        StartingShimmerBar().frame(maxWidth: CGFloat.infinity)
+                    } else {
+                        Group {
+                    if model.operation == .starting {
+                        StartingShimmerBar().frame(maxWidth: CGFloat.infinity)
+                    } else {
+                        Group {
+                    if model.operation == .starting {
+                        StartingShimmerBar().frame(maxWidth: CGFloat.infinity)
+                    } else {
+                        ReRouteProgressBar(value: model.progress, total: 1).frame(maxWidth: CGFloat.infinity)
+                    }
+                }
+                    }
+                }
+                    }
+                }
+                    }
+                }
+                    .progressViewStyle(.linear)
+            }
+            if let lastReboot = model.lastReboot {
+                Text("Last reboot: \(relative(lastReboot))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            if case .failed(let msg) = model.operation {
+                Text("Failed: \(msg)")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            } else if let err = model.lastError {
+                Text("Failed: \(err)")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            }
+        }
+        .padding(12)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.white.opacity(0.10), lineWidth: 1)
+        )
+    }
+
+    private var pct: Int {
+        Int((model.progress * 100).rounded())
+    }
+
+    private func relative(_ date: Date) -> String {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+private struct InternetPill: View {
+    let status: AppModel.InternetStatus
+
+    var body: some View {
+        let (text, color) = pill()
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .background(color.opacity(0.18))
+            .foregroundStyle(color)
+            .clipShape(Capsule())
+    }
+
+    private func pill() -> (String, Color) {
+        switch status {
+        case .online: return ("Internet: Online", .green)
+        case .offline: return ("Internet: Offline", .orange)
+        case .unknown: return ("Internet: Unknown", .secondary)
+        }
+    }
+}
+
+// MARK: - Custom progress bar (empty at 0%)
+struct ReRouteProgressBar: View {
+    let value: Double
+    let total: Double
+
+    private let height: CGFloat = 8
+    private let trackOpacity: Double = 0.10
+    private let borderOpacity: Double = 0.10
+    private let fillOpacity: Double = 0.95
+
+    private var ratio: Double {
+        guard total > 0 else { return 0 }
+        return min(max(value / total, 0), 1)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let fillW = max(0, w * ratio)
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(trackOpacity))
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(Color.white.opacity(borderOpacity), lineWidth: 1)
+                    )
+
+                Capsule()
+                    .fill(Color.accentColor.opacity(fillOpacity))
+                    .frame(width: fillW)
+                    // IMPORTANT: no "nub" at 0%
+                    .opacity(ratio <= 0.00001 ? 0 : 1)
+            }
+        }
+        .frame(height: height)
+        .clipShape(Capsule())
+    }
+}
+
