@@ -1,74 +1,20 @@
 import Foundation
 import SwiftUI
-import Network
 import AppKit
 
-@MainActor
 final class AppModel: ObservableObject {
 
-    private func graceCountdown(_ seconds: Int) async {
-        guard seconds > 0 else {
-            ui { self.startingCountdown = 0; self.touch() }
-            return
-        }
-        ui { self.startingCountdown = seconds; self.touch() }
-        for remaining in stride(from: seconds, to: 0, by: -1) {
-            if Task.isCancelled { return }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            ui { self.startingCountdown = max(0, remaining - 1); self.touch() }
-        }
-    }
-
-
-    private func isCancelError(_ error: Error) -> Bool {
-        if Task.isCancelled { return true }
-        if let ue = error as? URLError { return ue.code == .cancelled }
-        let ns = error as NSError
-        return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
-    }
-
-
-    private func pingOnce(host: String, timeoutMs: Int = 1000) async -> Bool {
-        await Task.detached(priority: .utility) {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/sbin/ping")
-            p.arguments = ["-n", "-c", "1", "-W", "\(timeoutMs)", host]
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError = FileHandle.nullDevice
-            do {
-                try p.run()
-                p.waitUntilExit()
-                return p.terminationStatus == 0
-            } catch {
-                return false
-            }
-        }.value
-    }
-
-
-    // Ensure UI-driving state changes happen on the main thread
-    private func ui(_ f: @escaping () -> Void) {
-        if Thread.isMainThread {
-            f()
-        } else {
-            DispatchQueue.main.async { f() }
-        }
-    }
-
-
-    enum InternetStatus: String {
+    enum InternetStatus: String, Equatable {
         case online = "Online"
         case offline = "Offline"
-        case unknown = "Unknown"
     }
 
     enum Operation: Equatable {
-            case starting
-case idle
+        case idle
+        case starting
         case rebooting
         case verifying
         case failed(String)
-        case cancelled
 
         var label: String {
             switch self {
@@ -77,365 +23,346 @@ case idle
             case .rebooting: return "Rebooting"
             case .verifying: return "Verifying"
             case .failed: return "Failed"
-            case .cancelled: return "Cancelled"
             }
         }
 
-        var isRunning: Bool {
+        var isBusy: Bool {
             switch self {
-            case .rebooting, .verifying: return true
-            default: return false
+            case .starting, .rebooting, .verifying:
+                return true
+            default:
+                return false
             }
         }
     }
 
-    // Settings (minimal; can extend later)
-    @AppStorage("router_host") var routerHost: String = "192.168.1.1"
-    @AppStorage("router_username") var routerUsername: String = "admin"
-    @AppStorage("ask_confirm_reboot_now") var askConfirmRebootNow: Bool = true
-    @AppStorage("notify_when_back") var notifyWhenBack: Bool = true
-    @AppStorage("open_terminal_debug") var openTerminalDebug: Bool = true
+    // Settings
+    @AppStorage("reroute.routerHost") var routerHost: String = "192.168.1.1"
+    @AppStorage("reroute.routerUsername") var routerUsername: String = "admin"
+    @AppStorage("reroute.routerPassword") var routerPassword: String = "admin"
+    @AppStorage("reroute.askConfirmRebootNow") var askConfirmRebootNow: Bool = true
+    @AppStorage("reroute.notifyWhenBack") var notifyWhenBack: Bool = true
+    @AppStorage("reroute.openTerminalDebug") var openTerminalDebug: Bool = true
 
-    // NOTE: password is stored in plaintext for now; can switch to Keychain next.
-    @AppStorage("router_password") var routerPassword: String = "admin"
-
-    @Published var internet: InternetStatus = .unknown
-    @Published var graceEndsAt: Date? = nil
+    // UI state
+    @Published var internet: InternetStatus = .online
     @Published var operation: Operation = .idle
-
-    /// 0.0 - 1.0
-    @Published var progress: Double = 0
-    @Published var startingCountdown: Int = 0
-    @Published var lastSuccessAt: Date? = nil
-    @Published var estimatedRebootSeconds: Double = 109.0
+    @Published var progress: Double = 0.0               // 0..1
+    @Published var startingCountdown: Int = 0           // 5..1 during grace
     @Published var lastUpdate: Date? = nil
     @Published var lastReboot: Date? = nil
     @Published var lastError: String? = nil
+    @Published var lastSuccessAt: Date? = nil
 
+    // Used by StatusBlock ETA
+    @Published var estimatedRebootSeconds: Double = 107
+    @Published var progressStartedAt: Date? = nil
+
+    // Internal
+    private let startingGraceSeconds: Int = 5
     private let log = AppLog()
-    private var rebootTask: Task<Void, Never>? = nil
-
     private let router = RouterClient()
     private let internetProbe = InternetProbe()
+    private var rebootTask: Task<Void, Never>? = nil
+    private var progressTask: Task<Void, Never>? = nil
 
     init() {
-        self.estimatedRebootSeconds = loadEstimateSeconds()
-        internetProbe.onUpdate = { [weak self] status in
-            Task { @MainActor in
-                self?.internet = status ? .online : .offline
-                self?.touch()
+        estimatedRebootSeconds = loadEstimateSeconds()
+
+        internetProbe.onUpdate = { [weak self] isOnline in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.internet = isOnline ? .online : .offline
+                self.touch()
             }
         }
         internetProbe.start()
     }
-    private let startingGraceSeconds: Int = 5
-
 
     func touch() { lastUpdate = Date() }
 
-    func canCancel() -> Bool { operation.isRunning }
-
     func cancel() {
-        ui { self.startingCountdown = 0; self.touch() }
-
-        ui { self.startingCountdown = 0; self.touch() }
-
-        ui { self.startingCountdown = 0; self.touch() }
-
-        ui { self.startingCountdown = 0; self.touch() }
-
-        ui { self.startingCountdown = 0; self.touch() }
-
-        rebootTask?.cancel()
-        rebootTask = nil
-                DispatchQueue.main.async { self.operation = .cancelled; self.touch() }
-        lastError = nil
-                DispatchQueue.main.async { self.progress = 0; self.touch() }
+        guard operation == .starting else { return }
         log.write("CANCEL requested by user")
 
+        rebootTask?.cancel()
+        progressTask?.cancel()
+        rebootTask = nil
+        progressTask = nil
 
-        ui {
-            // REROUTE_CANCEL_RESET
-            self.rebootTask?.cancel()
-            self.rebootTask = nil
-            self.startingCountdown = 0
+        DispatchQueue.main.async {
             self.operation = .idle
+            self.startingCountdown = 0
             self.progress = 0.0
+            self.progressStartedAt = nil
+            self.lastError = nil
             self.touch()
         }
-
     }
 
     func rebootNow(debugMode: Bool) {
-        guard operation == .idle else { return }
+        guard operation.isBusy == false else { return }
 
         lastError = nil
-        operation = .rebooting
-                DispatchQueue.main.async { self.progress = 0.05; self.touch() }
-        if debugMode, openTerminalDebug {
+        DispatchQueue.main.async {
+            self.operation = .starting
+            self.startingCountdown = self.startingGraceSeconds
+            self.progress = 0.0
+            self.progressStartedAt = nil
+            self.touch()
+        }
+
+        if debugMode && openTerminalDebug {
             TerminalHelper.openTail(logFilePath: log.filePath)
         }
 
-        rebootTask = Task { await runReboot(debugMode: debugMode) }
+        rebootTask?.cancel()
+        rebootTask = Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            await self.runReboot(debugMode: debugMode)
+        }
     }
 
     private func runReboot(debugMode: Bool) async {
         do {
             log.write("START (debug=\(debugMode))")
-                DispatchQueue.main.async { self.operation = .starting; self.progress = 0.0; self.touch(); self.progress = 0.0; self.touch() }
-            // Arming window (cancelable before the reboot POST is sent)
-            let graceSeconds = 2
-            ui { self.operation = .starting; self.progress = 0.0; self.startingCountdown = self.startingGraceSeconds; self.touch() }
 
-            
+            // Grace countdown: 5..1. No progress movement here.
+            await graceCountdown(seconds: startingGraceSeconds)
+            try Task.checkCancellation()
 
-            await graceCountdown(graceSeconds)
-if graceSeconds > 0 {
-                for remaining in stride(from: graceSeconds, to: 0, by: -1) {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    ui { self.startingCountdown = max(0, remaining - 1); self.touch() }
-                }
-            }
             let host = routerHost.trimmingCharacters(in: .whitespacesAndNewlines)
             let user = routerUsername
             let pass = routerPassword
 
-            // ---- curl-equivalent reboot flow (single session + cookies) ----
-            let config = URLSessionConfiguration.default
-            config.httpShouldSetCookies = true
-            config.httpCookieAcceptPolicy = .always
-            config.httpCookieStorage = HTTPCookieStorage.shared
-            config.requestCachePolicy = .reloadIgnoringLocalCacheData
-            config.urlCache = nil
-            let session = URLSession(configuration: config)
-
-            func extractSessionKey(from html: String) throws -> String {
-                let r = try NSRegularExpression(pattern: #"var\s+sessionkey\s*=\s*'([0-9]+)'"#, options: [])
-                let range = NSRange(html.startIndex..<html.endIndex, in: html)
-                if let m = r.firstMatch(in: html, options: [], range: range),
-                   let g1 = Range(m.range(at: 1), in: html) {
-                    return String(html[g1])
-                }
-                throw NSError(domain: "ReRoute", code: -10, userInfo: [NSLocalizedDescriptionKey: "sessionKey not found in HTML"])
+            // Commit phase begins: hide cancel + switch to rebooting
+            await MainActor.run {
+                self.startingCountdown = 0
+                self.operation = .rebooting
+                self.progress = 0.0
+                self.progressStartedAt = nil
+                self.touch()
             }
 
-            func getHTML(_ url: URL, timeout: TimeInterval = 8) async throws -> String {
-                var req = URLRequest(url: url)
-                req.httpMethod = "GET"
-                req.timeoutInterval = timeout
-                req.cachePolicy = .reloadIgnoringLocalCacheData
-                req.setValue("ReRoute", forHTTPHeaderField: "User-Agent")
-                let (data, resp) = try await session.data(for: req)
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                let text = String(data: data, encoding: .utf8) ?? ""
-                if code < 200 || code >= 400 {
-                    let head = String(text.prefix(200))
-                    throw NSError(domain: "ReRoute", code: code, userInfo: [NSLocalizedDescriptionKey: "GET \(url.path) http=\(code) head=\(head)"])
-                }
-                return text
-            }
-
-            func postForm(_ url: URL, referer: URL, body: String, timeout: TimeInterval = 12) async throws -> (Int, String) {
-                var req = URLRequest(url: url)
-                req.httpMethod = "POST"
-                req.timeoutInterval = timeout
-                req.cachePolicy = .reloadIgnoringLocalCacheData
-                req.httpBody = body.data(using: .utf8)
-
-                let origin = "\(url.scheme ?? "http")://\(url.host ?? "")"
-                req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-                req.setValue(origin, forHTTPHeaderField: "Origin")
-                req.setValue(referer.absoluteString, forHTTPHeaderField: "Referer")
-                req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-                req.setValue("ReRoute", forHTTPHeaderField: "User-Agent")
-
-                let (data, resp) = try await session.data(for: req)
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                let text = String(data: data, encoding: .utf8) ?? ""
-                return (code, text)
-            }
-
-            let base = URL(string: "http://\(host)/")!
-                DispatchQueue.main.async { self.progress = 0.0; self.touch() }
             log.write("GET / (login page)")
-
-            let loginHTML = try await getHTML(base)
-            let loginKey = try extractSessionKey(from: loginHTML)
+            let loginKey = try await router.fetchLoginSessionKey(host: host)
             log.write("loginKey=\(loginKey)")
-            try Task.checkCancellation()
-                DispatchQueue.main.async { self.progress = 0.0; self.touch() }
+
             log.write("POST postlogin.cgi")
+            try await router.login(host: host, loginKey: loginKey, username: user, password: pass)
 
-            let loginURL = URL(string: "http://\(host)/postlogin.cgi?sessionKey=\(loginKey)")!
-            let loginBody = "sessionKey=\(loginKey)&loginUsername=\(user)&loginPassword=\(pass)"
-            let (loginCode, loginResp) = try await postForm(loginURL, referer: base, body: loginBody)
-            log.write("postlogin http=\(loginCode) head=\(String(loginResp.prefix(120)))")
-            try Task.checkCancellation()
-                DispatchQueue.main.async { self.progress = 0.0; self.touch() }
             log.write("GET securite-pb1-motdepasse.html (auth key)")
-
-            let secURL = URL(string: "http://\(host)/securite-pb1-motdepasse.html")!
-            let secHTML = try await getHTML(secURL)
-            let authKey = try extractSessionKey(from: secHTML)
+            let authKey = try await router.fetchAuthenticatedSessionKey(host: host)
             log.write("authKey=\(authKey)")
-            try Task.checkCancellation()
-                DispatchQueue.main.async { self.progress = 0.0; self.touch() }
+
             log.write("POST rebootinfo.cgi")
+            try await router.reboot(host: host, sessionKey: authKey)
 
-            let rebootURL = URL(string: "http://\(host)/rebootinfo.cgi?sessionKey=\(authKey)")!
-            let rebootBody = "sessionKey=\(authKey)"
-            let (rebootCode, rebootResp) = try await postForm(rebootURL, referer: secURL, body: rebootBody)
-            let rebootHead = String(rebootResp.prefix(220))
-            log.write("rebootinfo http=\(rebootCode) head=\(rebootHead)")
-
-            // If router returns login form (still 200), treat as failure.
-            let lower = rebootResp.lowercased()
-            if rebootCode != 200 || lower.contains("postlogin.cgi") || lower.contains("loginusername") {
-                throw NSError(domain: "ReRoute", code: -20, userInfo: [NSLocalizedDescriptionKey: "reboot rejected (login page or bad status). http=\(rebootCode)"])
+            let postAt = Date()
+            await MainActor.run {
+                self.progress = 0.0
+                self.progressStartedAt = postAt
+                self.touch()
             }
-            // ---- end curl-equivalent reboot flow ----
-                DispatchQueue.main.async { self.operation = .rebooting; self.touch() }
-            
+
+            startLinearProgress(from: postAt)
+
             log.write("monitoring ping+wan")
+            let result = try await monitorReboot(host: host)
 
-            // Estimated duration (seconds) for linear progress
-            let estimated = max(30.0, min(240.0, loadEstimateSeconds()))
-                DispatchQueue.main.async { self.estimatedRebootSeconds = estimated; self.touch() }
+            // Success
+            let measured = Date().timeIntervalSince(postAt)
+            updateEstimateSeconds(with: measured)
 
-            let startTime = Date()
+            await MainActor.run {
+                self.progressTask?.cancel()
+                self.progressTask = nil
 
-            // Linear progress ticker: 0 -> 1 over estimated seconds
-            let progressTask = Task.detached(priority: .utility) { [weak self] in
-                guard let self else { return }
-                while !Task.isCancelled {
-                    let elapsed = Date().timeIntervalSince(startTime)
-                    let p = min(1.0, max(0.0, elapsed / estimated))
-                    DispatchQueue.main.async { self.progress = p; self.touch() }
-                    try? await Task.sleep(nanoseconds: 250_000_000) // 0.25s
-                }
+                self.progress = 1.0
+                self.operation = .idle
+                self.lastReboot = Date()
+                self.lastSuccessAt = Date()
+                self.lastError = nil
+                self.progressStartedAt = nil
+                self.touch()
             }
 
-            // Router ping & WAN probe thresholds
-            let routerDownThreshold = 3
-            let routerUpThreshold = 2
-            let wanDownThreshold = 2
-            let wanUpThreshold = 2
+            scheduleProgressResetIfIdle(after: 5)
 
-            var routerDownSeen = false
-            var routerUpSeen = false
-            var wanDownSeen = false
-            var wanUpSeen = false
-
-            var rFail = 0, rOk = 0
-            var wFail = 0, wOk = 0
-
-            // Stay in rebooting until router is back, then verifying until WAN is back
-                DispatchQueue.main.async { self.operation = .rebooting; self.touch() }
-
-            var observedWanUpAt: Date? = nil
-
-            for i in 1...240 {
-                try Task.checkCancellation()
-
-                // Router ping (every 1s)
-                let pingOK = await pingOnce(host: host, timeoutMs: 1000)
-                if pingOK { rOk += 1; rFail = 0 } else { rFail += 1; rOk = 0 }
-
-                if !routerDownSeen && rFail >= routerDownThreshold {
-                    routerDownSeen = true
-                    log.write("ROUTER_DOWN at i=\(i)")
-                }
-                if routerDownSeen && !routerUpSeen && rOk >= routerUpThreshold {
-                    routerUpSeen = true
-                    log.write("ROUTER_UP at i=\(i)")
-                DispatchQueue.main.async { self.operation = .verifying; self.touch() }
-                }
-
-                // WAN probe (every 2s)
-                if i % 2 == 0 {
-                    let wanOK = await wanIsUp()
-                    if wanOK { wOk += 1; wFail = 0 } else { wFail += 1; wOk = 0 }
-
-                    if !wanDownSeen && wFail >= wanDownThreshold {
-                        wanDownSeen = true
-                DispatchQueue.main.async { self.internet = .offline;
-                    self.idleInternetProgressSync()
-                    self.self.idleInternetProgressSync(); self.touch() }
-                        log.write("WAN_DOWN at i=\(i)")
-                    }
-                    if wanDownSeen && !wanUpSeen && wOk >= wanUpThreshold {
-                        wanUpSeen = true
-                        observedWanUpAt = Date()
-                DispatchQueue.main.async { self.internet = .online;
-                    self.idleInternetProgressSync()
-                    self.self.idleInternetProgressSync(); self.touch() }
-                        log.write("WAN_UP at i=\(i)")
-                    }
-                }
-
-                // Success condition:
-                // router is back AND WAN is back
-                if routerUpSeen && wanUpSeen {
-                    break
-                }
-
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-
-            progressTask.cancel()
-
-            let confirmed = routerUpSeen && wanUpSeen
-            log.write("DONE (confirmed=\(confirmed)) routerUp=\(routerUpSeen) wanUp=\(wanUpSeen)")
-
-            if confirmed {
-                DispatchQueue.main.async {
-                    self.operation = .idle
-                    self.progress = 1.0
-                    self.lastSuccessAt = Date()
-                    self.lastReboot = Date()
-                    self.touch()
-                }
-                // Update EMA estimate from measured duration (to WAN_UP)
-                let measured = (observedWanUpAt ?? Date()).timeIntervalSince(startTime)
-                updateEstimateSeconds(with: measured)
-            } else {
-                DispatchQueue.main.async {
-                    self.operation = .failed("Timeout waiting for WAN/router")
-                    self.touch()
-                }
-            }
-if notifyWhenBack {
+            if notifyWhenBack {
                 NotificationHelper.notify(
-                    title: "Router reboot",
-                    body: (operation == .idle) ? "Confirmed (down→up)." : "Request sent; not confirmed within timeout."
+                    title: "Internet is back",
+                    body: "ReRoute confirmed WAN up (routerUp=\(result.routerUp), wanUp=\(result.wanUp))."
                 )
             }
+
         } catch is CancellationError {
-            log.write("CANCELLED (task)")
-                DispatchQueue.main.async { self.operation = .cancelled; self.touch() }
-                DispatchQueue.main.async { self.progress = 0; self.touch() }
+            log.write("CANCELLED")
+            await MainActor.run {
+                self.progressTask?.cancel()
+                self.progressTask = nil
+
+                self.operation = .idle
+                self.startingCountdown = 0
+                self.progress = 0.0
+                self.progressStartedAt = nil
+                self.touch()
+            }
         } catch {
+            log.write("ERROR: \(error.localizedDescription)")
+            await MainActor.run {
+                self.progressTask?.cancel()
+                self.progressTask = nil
 
-                if isCancelError(error) {
-                    log.write("CANCELLED (handled)")
-                    ui {
-                        self.startingCountdown = 0
-                        self.operation = .idle
-                        self.progress = 0.0
-                        self.rebootTask = nil
-                        self.touch()
-                    }
-                    return
-                }
-
-            log.write("ERROR: \(error)")
-                DispatchQueue.main.async { self.operation = .failed(error.localizedDescription); self.touch() }
-            lastError = error.localizedDescription
-                DispatchQueue.main.async { self.progress = 0; self.touch() }
+                self.operation = .failed(error.localizedDescription)
+                self.lastError = error.localizedDescription
+                self.startingCountdown = 0
+                self.progress = 0.0
+                self.progressStartedAt = nil
+                self.touch()
+            }
             NotificationHelper.notify(title: "Router reboot failed", body: error.localizedDescription)
         }
 
         rebootTask = nil
+    }
+
+    private func graceCountdown(seconds: Int) async {
+        await MainActor.run {
+            self.operation = .starting
+            self.startingCountdown = seconds
+            self.progress = 0.0
+            self.progressStartedAt = nil
+            self.touch()
+        }
+
+        guard seconds > 0 else { return }
+
+        for remaining in stride(from: seconds, to: 0, by: -1) {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            if Task.isCancelled { return }
+            await MainActor.run {
+                self.startingCountdown = max(0, remaining - 1)
+                self.touch()
+            }
+        }
+    }
+
+    private func startLinearProgress(from start: Date) {
+        progressTask?.cancel()
+        let total = max(30.0, min(240.0, estimatedRebootSeconds))
+
+        progressTask = Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+
+            while !Task.isCancelled {
+                let elapsed = Date().timeIntervalSince(start)
+                // Fill linearly, but cap at 95% until we truly confirm completion.
+                let p = min(max(elapsed / total, 0), 0.95)
+
+                await MainActor.run {
+                    // Only update while we're in the run states
+                    if self.operation.isBusy {
+                        self.progress = p
+                        self.touch()
+                    }
+                }
+
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+    }
+
+    private struct MonitorResult {
+        let routerDown: Bool
+        let routerUp: Bool
+        let wanDown: Bool
+        let wanUp: Bool
+    }
+
+    
+    private func routerReachable(host: String) async -> Bool {
+        guard let url = URL(string: "http://\(host)/") else { return false }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 1.2
+        do {
+            let (_, resp) = try await URLSession.shared.data(for: req)
+            return (resp as? HTTPURLResponse) != nil
+        } catch {
+            return false
+        }
+    }
+
+private func monitorReboot(host: String) async throws -> MonitorResult {
+        let maxSeconds = 240
+        var routerDown = false
+        var routerUp = false
+        var wanDown = false
+        var wanUp = false
+
+        for i in 0..<maxSeconds {
+            try Task.checkCancellation()
+
+            // Router ping
+            let rOK = await self.routerReachable(host: host)
+            if !routerDown && !rOK {
+                routerDown = true
+                log.write("ROUTER_DOWN at i=\(i)")
+            }
+            if routerDown && !routerUp && rOK {
+                routerUp = true
+                log.write("ROUTER_UP at i=\(i)")
+                await MainActor.run { self.operation = .verifying; self.touch() }
+            }
+
+            // WAN probe
+            let wOK = await wanIsUp()
+            if !wanDown && !wOK {
+                wanDown = true
+                log.write("WAN_DOWN at i=\(i)")
+            }
+            if wanDown && !wanUp && wOK {
+                wanUp = true
+                log.write("WAN_UP at i=\(i)")
+            }
+
+            if routerUp && wanUp {
+                log.write("DONE (confirmed=true) routerUp=true wanUp=true")
+                return MonitorResult(routerDown: routerDown, routerUp: routerUp, wanDown: wanDown, wanUp: wanUp)
+            }
+
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
+
+        log.write("DONE (confirmed=false)")
+        throw NSError(domain: "ReRoute", code: 1, userInfo: [NSLocalizedDescriptionKey: "Timeout waiting for router/WAN to return"])
+    }
+
+    private func wanIsUp() async -> Bool {
+        guard let url = URL(string: "http://clients3.google.com/generate_204") else { return false }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 3
+
+        do {
+            let (_, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse {
+                return (200...399).contains(http.statusCode)
+            }
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    private func scheduleProgressResetIfIdle(after seconds: Double) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            if self.operation.isBusy == false && self.progress >= 0.999 {
+                self.progress = 0.0
+                self.progressStartedAt = nil
+                self.touch()
+            }
+        }
     }
 
     func openRouterUI() {
@@ -449,11 +376,15 @@ if notifyWhenBack {
     }
 
     func openSettingsWindow() {
-        WindowManager.shared.showSettings(model: self)
+        Task { @MainActor in
+            WindowManager.shared.showSettings(model: self)
+        }
     }
 
     func openAboutWindow() {
-        WindowManager.shared.showAbout()
+        Task { @MainActor in
+            WindowManager.shared.showAbout()
+        }
     }
 
     func copyDiagnostics() {
@@ -462,15 +393,14 @@ if notifyWhenBack {
         Internet: \(internet.rawValue)
         Operation: \(operation.label)
         Progress: \(Int((progress * 100).rounded()))%
-        Last update: \(lastUpdate?.description ?? "n/a")
         Last reboot: \(lastReboot?.description ?? "n/a")
         Error: \(lastError ?? "n/a")
         """
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
+
     var menuSymbolName: String {
-        // Success pulse for ~5 seconds after completion
         if let t = lastSuccessAt, Date().timeIntervalSince(t) < 5.0 {
             return "checkmark.circle"
         }
@@ -484,28 +414,16 @@ if notifyWhenBack {
             return "antenna.radiowaves.left.and.right"
         case .failed:
             return "exclamationmark.triangle"
-        case .cancelled:
-            return "xmark.circle"
-        default:
-            switch internet {
-            case .online:  return "wifi"
-            case .offline: return "wifi.slash"
-            default:       return "wifi.exclamationmark"
-            }
+        case .idle:
+            return internet == .online ? "wifi" : "wifi.slash"
         }
     }
-        }
-    
 
-
-
-    
-extension AppModel {
     private var Key_rebootEMA: String { "reroute.rebootEMASeconds" }
-    private var Key_rebootCount: String { "reroute.rebootCount" }
+
     private func loadEstimateSeconds() -> Double {
         let v = UserDefaults.standard.double(forKey: Key_rebootEMA)
-        return v > 0 ? v : 109.0
+        return v > 0 ? v : 107.0
     }
 
     private func updateEstimateSeconds(with measured: Double) {
@@ -515,46 +433,13 @@ extension AppModel {
         let next = alpha * clamped + (1.0 - alpha) * prev
         UserDefaults.standard.set(next, forKey: Key_rebootEMA)
 
-        let c = UserDefaults.standard.integer(forKey: Key_rebootCount)
-        UserDefaults.standard.set(c + 1, forKey: Key_rebootCount)
-                DispatchQueue.main.async { self.estimatedRebootSeconds = next; self.touch() }
-    }
-
-    private func wanIsUp() async -> Bool {
-        guard let url = URL(string: "https://clients3.google.com/generate_204") else { return false }
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        req.cachePolicy = .reloadIgnoringLocalCacheData
-        req.timeoutInterval = 2.5
-
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-        cfg.urlCache = nil
-        cfg.httpShouldSetCookies = false
-        cfg.timeoutIntervalForRequest = 2.5
-        cfg.timeoutIntervalForResource = 2.5
-
-        do {
-            let (_, resp) = try await URLSession(configuration: cfg).data(for: req)
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-            return code == 204
-        } catch {
-            return false
+        DispatchQueue.main.async {
+            self.estimatedRebootSeconds = next
+            self.touch()
         }
     }
+}
 
-
-    private func idleInternetProgressSync() {
-        // When idle, show "health" as a full bar if internet is online.
-        guard operation == .idle else { return }
-        switch internet {
-        case .online:
-            progress = 1.0
-        case .offline:
-            progress = 0.0
-        default:
-            break
-        }
-    }
-
+private extension AppModel.InternetStatus {
+    var isOnline: Bool { self == .online }
 }

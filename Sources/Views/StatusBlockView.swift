@@ -1,40 +1,9 @@
 import SwiftUI
 import Foundation
 
-// MARK: - Internet pill (generic, no dependency on your model types)
-struct InternetPill<S>: View {
-    let status: S
+// MARK: - Local bars (inlined so build doesn't depend on separate files being in the Xcode target)
 
-    private var raw: String { String(describing: status).lowercased() }
-
-    private var isOnline: Bool {
-        raw.contains("online") || raw.contains("up") || raw.contains("reachable")
-    }
-
-    private var title: String {
-        if raw.contains("offline") || raw.contains("down") || raw.contains("unreachable") { return "Offline" }
-        if isOnline { return "Online" }
-        return String(describing: status)
-    }
-
-    var body: some View {
-        Text(title)
-            .font(.system(size: 11, weight: .semibold))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(Color.white.opacity(isOnline ? 0.14 : 0.10))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(Color.white.opacity(isOnline ? 0.18 : 0.12), lineWidth: 1)
-            )
-    }
-}
-
-// MARK: - Starting shimmer bar (full width)
-struct StartingShimmerBar: View {
+struct ReRouteStartingShimmerBar: View {
     private let height: CGFloat = 8
     @State private var t: CGFloat = 0
 
@@ -67,21 +36,18 @@ struct StartingShimmerBar: View {
                     .blendMode(.screen)
                     .opacity(0.95)
             }
-            .clipShape(Capsule())
+            .clipShape(Capsule()) // IMPORTANT: shimmer never bleeds outside
             .onAppear {
                 t = 0
-                withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
-                    t = 1
-                }
+                withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) { t = 1 }
             }
         }
         .frame(height: height)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: CGFloat.infinity)
     }
 }
 
-// MARK: - Progress bar (completely empty at 0%)
-struct ReRouteProgressBar: View {
+struct ReRouteProgressBarView: View {
     let value: Double
     let total: Double
     private let height: CGFloat = 8
@@ -99,12 +65,14 @@ struct ReRouteProgressBar: View {
             ZStack(alignment: .leading) {
                 Capsule()
                     .fill(Color.white.opacity(0.10))
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+                    .overlay(
+                        Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
+                    )
 
                 Capsule()
                     .fill(Color.accentColor.opacity(0.95))
                     .frame(width: fillW)
-                    .opacity(ratio <= 0.00001 ? 0 : 1) // no nub at 0%
+                    .opacity(ratio <= 0.00001 ? 0 : 1) // fully empty at 0%
             }
         }
         .frame(height: height)
@@ -112,38 +80,53 @@ struct ReRouteProgressBar: View {
     }
 }
 
-// MARK: - Status block
+
+struct InternetPill<S>: View {
+    let status: S
+    private var raw: String { String(describing: status).lowercased() }
+
+    private var isOnline: Bool {
+        raw.contains("online") || raw.contains("up") || raw.contains("reachable")
+    }
+
+    private var title: String {
+        if raw.contains("offline") || raw.contains("down") || raw.contains("unreachable") { return "Offline" }
+        if isOnline { return "Online" }
+        return String(describing: status)
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Capsule(style: .continuous).fill(Color.white.opacity(isOnline ? 0.14 : 0.10)))
+            .overlay(Capsule(style: .continuous).strokeBorder(Color.white.opacity(isOnline ? 0.18 : 0.12), lineWidth: 1))
+    }
+}
+
 struct StatusBlockView: View {
     @EnvironmentObject var model: AppModel
 
-    // Adjust: average reboot duration (ETA base)
-    private let estimatedTotalSeconds: Double = 107
-
-    // Progress reset after success
-    @State private var resetToken = UUID()
     private let progressResetDelaySeconds: Double = 5
-
-    // ETA start time (for 1Hz countdown)
-    @State private var etaStart: Date? = nil
+    @State private var resetToken = UUID()
 
     private var pct: Int { Int((model.progress * 100).rounded()) }
 
-    private var operationText: String {
-        String(describing: model.operation)
-    }
-
     private var isStarting: Bool {
-        operationText.lowercased().contains("starting")
+        if case .starting = model.operation { return true }
+        return false
     }
 
     private var showETA: Bool {
-        model.progress > 0.001 && model.progress < 0.999
+        model.progressStartedAt != nil && model.progress > 0.001 && model.progress < 0.999
     }
 
     private func remainingSeconds(at date: Date) -> Int {
-        guard let start = etaStart else { return Int(estimatedTotalSeconds) }
+        let total = max(1, Int(ceil(model.estimatedRebootSeconds)))
+        guard let start = model.progressStartedAt else { return total }
         let elapsed = date.timeIntervalSince(start)
-        return max(0, Int(ceil(estimatedTotalSeconds - elapsed)))
+        return max(0, Int(ceil(Double(total) - elapsed)))
     }
 
     var body: some View {
@@ -156,7 +139,7 @@ struct StatusBlockView: View {
 
             HStack {
                 Text("Operation:").foregroundStyle(.secondary)
-                Text(operationText).fontWeight(.semibold)
+                Text(model.operation.label).fontWeight(.semibold)
                 Spacer()
             }
 
@@ -170,11 +153,11 @@ struct StatusBlockView: View {
                 }
 
                 if isStarting {
-                    StartingShimmerBar()
-                        .frame(maxWidth: .infinity)
+                    ReRouteStartingShimmerBar()
+                        .frame(maxWidth: CGFloat.infinity)
                 } else {
-                    ReRouteProgressBar(value: model.progress, total: 1)
-                        .frame(maxWidth: .infinity)
+                    ReRouteProgressBarView(value: model.progress, total: 1)
+                        .frame(maxWidth: CGFloat.infinity)
                 }
 
                 if showETA {
@@ -193,12 +176,7 @@ struct StatusBlockView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if case .failed(let msg) = model.operation {
-                Text("Failed: \(msg)")
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            } else if let err = model.lastError {
+            if let err = model.lastError, !err.isEmpty {
                 Text("Failed: \(err)")
                     .font(.footnote)
                     .foregroundStyle(.red)
@@ -212,35 +190,22 @@ struct StatusBlockView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
         )
-        .onAppear {
-            // If menu opens mid-run, start ETA immediately so countdown isn't stuck.
-            if model.progress > 0.001 && model.progress < 0.999 && etaStart == nil {
-                etaStart = Date()
-            }
-        }
         .onChange(of: model.progress) { newValue in
-            // Start ETA when progress begins
-            if newValue > 0.001 && newValue < 0.999 && etaStart == nil { etaStart = Date() }
-            // Clear ETA when progress cleared or completed
-            if newValue <= 0.001 || newValue >= 0.999 { etaStart = nil }
-
-            // Cancel pending reset if we moved away from completion
             if newValue < 0.999 { resetToken = UUID() }
-
             scheduleProgressResetIfNeeded()
         }
     }
 
     private func scheduleProgressResetIfNeeded() {
         guard model.progress >= 0.999 else { return }
-
         let token = UUID()
         resetToken = token
 
         DispatchQueue.main.asyncAfter(deadline: .now() + progressResetDelaySeconds) {
             guard self.resetToken == token else { return }
-            if self.model.progress >= 0.999 {
+            if self.model.progress >= 0.999 && self.model.operation.isBusy == false {
                 self.model.progress = 0.0
+                self.model.progressStartedAt = nil
             }
         }
     }

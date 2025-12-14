@@ -4,9 +4,7 @@ struct ReRouteProgressBar: View {
     let value: Double
     let total: Double
 
-    // Adjust look here
     private let height: CGFloat = 8
-    private let corner: CGFloat = 999 // capsule
     private let trackOpacity: Double = 0.10
     private let borderOpacity: Double = 0.10
     private let fillOpacity: Double = 0.95
@@ -29,15 +27,13 @@ struct ReRouteProgressBar: View {
                             .strokeBorder(Color.white.opacity(borderOpacity), lineWidth: 1)
                     )
 
-                // IMPORTANT: fully hidden at 0% (no left “nub”)
                 Capsule()
                     .fill(Color.accentColor.opacity(fillOpacity))
                     .frame(width: fillW)
-                    .opacity(ratio <= 0.00001 ? 0 : 1)
+                    .opacity(ratio <= 0.00001 ? 0 : 1) // fully empty at 0%
             }
         }
         .frame(height: height)
-        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-        .contentShape(Rectangle())
+        .clipShape(Capsule())
     }
 }

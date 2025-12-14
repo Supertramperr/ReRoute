@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-// Pulsing label used for the grace-period Cancel row
+// Local: inlined so build doesn't depend on a separate file being in the Xcode target.
 struct CancelPulseLabel: View {
     let seconds: Int
     @State private var pulse = false
@@ -16,12 +16,12 @@ struct CancelPulseLabel: View {
     }
 }
 
+
 struct RootMenuView: View {
     @EnvironmentObject var model: AppModel
 
     private enum Screen { case main, more }
     @State private var screen: Screen = .main
-
     @State private var showConfirmReboot = false
 
     var body: some View {
@@ -41,33 +41,22 @@ struct RootMenuView: View {
 
     private var mainView: some View {
         VStack(spacing: 10) {
-
             MenuSection {
                 MenuRow(title: "Reboot Now…", systemImage: "arrow.clockwise") {
-                    if model.internet == .offline {
-                        showConfirmReboot = true
-                    } else if model.askConfirmRebootNow {
+                    if model.internet == .offline || model.askConfirmRebootNow {
                         showConfirmReboot = true
                     } else {
-                        graceLog("CLICK")
                         model.rebootNow(debugMode: false)
                     }
                 }
-                .disabled(model.operation != .idle)
+                .disabled(model.operation.isBusy)
 
-                // Grace-period Cancel ONLY (no blank/empty row when countdown hits 0)
                 if model.operation == .starting, model.startingCountdown > 0 {
-                    Button {
+                    MenuRowCustom(systemImage: "xmark.circle") {
+                        CancelPulseLabel(seconds: model.startingCountdown)
+                    } action: {
                         model.cancel()
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "xmark.circle").frame(width: 18)
-                            CancelPulseLabel(seconds: model.startingCountdown)
-                            Spacer()
-                        }
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(MenuRowStyle())
                 }
             }
 
@@ -84,7 +73,7 @@ struct RootMenuView: View {
 
             Divider().opacity(0.5)
 
-            MenuRow(title: "Quit", systemImage: "xmark.circle") {
+            MenuRow(title: "Quit", systemImage: "power") {
                 NSApp.terminate(nil)
             }
         }
@@ -112,7 +101,6 @@ struct RootMenuView: View {
                     primaryDestructive: true,
                     onPrimary: {
                         showConfirmReboot = false
-                        graceLog("CLICK")
                         model.rebootNow(debugMode: false)
                     },
                     onCancel: { showConfirmReboot = false }
@@ -121,8 +109,6 @@ struct RootMenuView: View {
         }
     }
 }
-
-// MARK: - Small building blocks
 
 private struct MenuSection<Content: View>: View {
     @ViewBuilder var content: Content
@@ -151,6 +137,24 @@ private struct MenuRow: View {
         if title.hasPrefix("Reboot") { return "r" }
         if title == "Quit" { return "q" }
         return nil
+    }
+}
+
+private struct MenuRowCustom<Label: View>: View {
+    let systemImage: String
+    @ViewBuilder var label: () -> Label
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage).frame(width: 18)
+                label()
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MenuRowStyle())
     }
 }
 
@@ -195,24 +199,5 @@ private extension View {
     @ViewBuilder
     func keyboardShortcutIf(_ key: KeyEquivalent?, modifiers: EventModifiers) -> some View {
         if let key { self.keyboardShortcut(key, modifiers: modifiers) } else { self }
-    }
-}
-
-// Writes GRACE markers into the same run.log for debugging
-private func graceLog(_ msg: String) {
-    let iso = ISO8601DateFormatter()
-    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    let line = "\(iso.string(from: Date())) GRACE " + msg + "\n"
-    let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-    let logURL = dir.appendingPathComponent("router-reboot").appendingPathComponent("run.log")
-    try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-    if let data = line.data(using: .utf8) {
-        if let h = try? FileHandle(forWritingTo: logURL) {
-            try? h.seekToEnd()
-            try? h.write(contentsOf: data)
-            try? h.close()
-        } else {
-            try? data.write(to: logURL, options: .atomic)
-        }
     }
 }
