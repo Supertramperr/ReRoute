@@ -25,7 +25,7 @@ final class WindowManager {
         win.hasShadow = true
         win.isMovableByWindowBackground = true
 
-        let size = NSSize(width: 560, height: 372)
+        let size = NSSize(width: 320, height: 320)
         win.setContentSize(size)
         win.minSize = size
         win.maxSize = size
@@ -55,7 +55,7 @@ final class WindowManager {
         win.hasShadow = true
         win.isMovableByWindowBackground = true
 
-        let size = NSSize(width: 420, height: 200)
+        let size = NSSize(width: 280, height: 280)
         win.setContentSize(size)
         win.minSize = size
         win.maxSize = size

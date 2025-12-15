@@ -53,13 +53,40 @@ struct MoreView: View {
             }
         }
         .padding(14)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        Color.white.opacity(0.26),
+                                        Color.white.opacity(0.08),
+                                        Color.white.opacity(0.16)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 1
+                            )
+
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [ Color.white.opacity(0.22), Color.clear ],
+                                    startPoint: .topLeading,
+                                    endPoint: .center
+                                ),
+                                lineWidth: 1
+                            )
+                            .blendMode(.screen)
+                            .opacity(0.7)
+                    }
+                )
+                .shadow(color: .black.opacity(0.25), radius: 18, x: 0, y: 8)
         )
-        .shadow(color: .black.opacity(0.25), radius: 18, x: 0, y: 8)
         .overlay {
             if showConfirmDebug {
                 GlassConfirmDialog(
