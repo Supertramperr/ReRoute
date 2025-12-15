@@ -1,22 +1,6 @@
 import SwiftUI
 import AppKit
 
-// Local: inlined so build doesn't depend on a separate file being in the Xcode target.
-struct CancelPulseLabel: View {
-    let seconds: Int
-    @State private var pulse = false
-
-    var body: some View {
-        Text("Cancel (\(seconds))")
-            .fontWeight(.semibold)
-            .opacity(pulse ? 1.0 : 0.86)
-            .scaleEffect(pulse ? 1.03 : 1.0)
-            .animation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true), value: pulse)
-            .onAppear { pulse = true }
-    }
-}
-
-
 struct RootMenuView: View {
     @EnvironmentObject var model: AppModel
 
@@ -49,14 +33,16 @@ struct RootMenuView: View {
                         model.rebootNow(debugMode: false)
                     }
                 }
-                .disabled(model.operation.isBusy)
+                .disabled(model.operation != .idle)
 
-                if model.operation == .starting, model.startingCountdown > 0 {
-                    MenuRowCustom(systemImage: "xmark.circle") {
-                        CancelPulseLabel(seconds: model.startingCountdown)
-                    } action: {
+                if model.operation == .starting {
+                    MenuRow(
+                        title: "Cancel (\(max(0, model.startingCountdown)))",
+                        systemImage: "xmark.circle"
+                    ) {
                         model.cancel()
                     }
+                    .reroutePulse(true)
                 }
             }
 
@@ -67,17 +53,17 @@ struct RootMenuView: View {
 
             Divider().opacity(0.5)
 
-            MenuRowDisclosure(title: "More", systemImage: "ellipsis.circle") {
-                screen = .more
-            }
+            MenuSection {
+                MenuRowDisclosure(title: "More", systemImage: "ellipsis.circle") {
+                    screen = .more
+                }
 
-            Divider().opacity(0.5)
-
-            MenuRow(title: "Quit", systemImage: "power") {
-                NSApp.terminate(nil)
+                MenuRow(title: "Quit", systemImage: "xmark.circle") {
+                    NSApp.terminate(nil)
+                }
             }
         }
-        .padding(14)
+        .padding(10) // outer margin of the whole menu
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
@@ -112,13 +98,14 @@ struct RootMenuView: View {
 
 private struct MenuSection<Content: View>: View {
     @ViewBuilder var content: Content
-    var body: some View { VStack(spacing: 6) { content } }
+    var body: some View { VStack(spacing: 0) { content } } // IMPORTANT: no dead gaps between rows
 }
 
 private struct MenuRow: View {
     let title: String
     let systemImage: String
     let action: () -> Void
+    @State private var hover = false
 
     var body: some View {
         Button(action: action) {
@@ -127,9 +114,10 @@ private struct MenuRow: View {
                 Text(title)
                 Spacer()
             }
-            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .buttonStyle(MenuRowStyle())
+        .buttonStyle(HoverGlowRowStyle(hover: hover))
+        .onHover { hover = $0 }
         .keyboardShortcutIf(shortcutKey(), modifiers: .command)
     }
 
@@ -140,28 +128,11 @@ private struct MenuRow: View {
     }
 }
 
-private struct MenuRowCustom<Label: View>: View {
-    let systemImage: String
-    @ViewBuilder var label: () -> Label
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: systemImage).frame(width: 18)
-                label()
-                Spacer()
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(MenuRowStyle())
-    }
-}
-
 private struct MenuRowDisclosure: View {
     let title: String
     let systemImage: String
     let action: () -> Void
+    @State private var hover = false
 
     var body: some View {
         Button(action: action) {
@@ -173,19 +144,39 @@ private struct MenuRowDisclosure: View {
                     .font(.system(size: 12, weight: .semibold))
                     .opacity(0.55)
             }
-            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .buttonStyle(MenuRowStyle())
+        .buttonStyle(HoverGlowRowStyle(hover: hover))
+        .onHover { hover = $0 }
     }
 }
 
-private struct MenuRowStyle: ButtonStyle {
+private struct HoverGlowRowStyle: ButtonStyle {
+    let hover: Bool
+
+    // TUNE THESE to remove “dead margins” while keeping it clickable:
+    private let vPad: CGFloat = 7
+    private let hPad: CGFloat = 8
+    private let radius: CGFloat = 10
+
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .padding(.vertical, 8)
-            .padding(.horizontal, 10)
-            .background(configuration.isPressed ? Color.white.opacity(0.08) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        let isActiveHover = hover && !configuration.isPressed
+        let fill = configuration.isPressed ? 0.12 : (isActiveHover ? 0.08 : 0.0)
+        let stroke = isActiveHover ? 0.18 : 0.0
+
+        return configuration.label
+            .padding(.vertical, vPad)
+            .padding(.horizontal, hPad)
+            .background(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(Color.white.opacity(fill))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(Color.white.opacity(stroke), lineWidth: 1)
+            )
+            .shadow(color: isActiveHover ? Color.white.opacity(0.06) : .clear, radius: 10, x: 0, y: 0)
+            .contentShape(Rectangle()) // IMPORTANT: hit-test includes the padded area
     }
 }
 
@@ -195,7 +186,23 @@ private extension Binding where Value == Bool {
     }
 }
 
+private struct ReRoutePulse: ViewModifier {
+    let enabled: Bool
+    @State private var pulse = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(enabled ? (pulse ? 1.0 : 0.86) : 1.0)
+            .scaleEffect(enabled ? (pulse ? 1.03 : 1.0) : 1.0)
+            .animation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true), value: pulse)
+            .onAppear { pulse = enabled }
+            .onChange(of: enabled) { v in pulse = v }
+    }
+}
+
 private extension View {
+    func reroutePulse(_ enabled: Bool) -> some View { self.modifier(ReRoutePulse(enabled: enabled)) }
+
     @ViewBuilder
     func keyboardShortcutIf(_ key: KeyEquivalent?, modifiers: EventModifiers) -> some View {
         if let key { self.keyboardShortcut(key, modifiers: modifiers) } else { self }

@@ -100,8 +100,14 @@ struct InternetPill<S>: View {
             .font(.system(size: 11, weight: .semibold))
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(Capsule(style: .continuous).fill(Color.white.opacity(isOnline ? 0.14 : 0.10)))
-            .overlay(Capsule(style: .continuous).strokeBorder(Color.white.opacity(isOnline ? 0.18 : 0.12), lineWidth: 1))
+            .background(
+                Capsule(style: .continuous)
+                    .fill(isOnline ? Color.green.opacity(0.22) : Color.red.opacity(0.22))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(isOnline ? Color.green.opacity(0.55) : Color.red.opacity(0.55), lineWidth: 1)
+            )
     }
 }
 
