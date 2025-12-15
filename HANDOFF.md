@@ -54,3 +54,7 @@ macOS menu bar app for rebooting a router + showing status/progress.
 Example:
   cp "Sources/_backups/<timestamp>-<topic>/RootMenuView.swift" "Sources/Views/RootMenuView.swift"
   xcodebuild -project ReRoute.xcodeproj -scheme ReRoute -destination "platform=macOS" -configuration Debug build
+
+## Maintenance scripts
+- `Scripts/doctor.sh` — sanity checks (list project, clean build, quick scans)
+- `Scripts/handoff.sh` — creates `ReRoute-handoff-YYYYMMDD-HHMMSS.tgz` excluding junk
