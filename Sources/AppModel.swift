@@ -36,8 +36,8 @@ case .failed: return "Failed"
 
     // Settings
     @AppStorage("reroute.routerHost") var routerHost: String = "192.168.1.1"
-    @AppStorage("reroute.routerUsername") var routerUsername: String = "admin"
-    @AppStorage("reroute.routerPassword") var routerPassword: String = "admin"
+    @AppStorage("reroute.routerUsername") var routerUsername: String = ""
+    @AppStorage("reroute.routerPassword") var routerPassword: String = ""
     @AppStorage("reroute.askConfirmRebootNow") var askConfirmRebootNow: Bool = true
     @AppStorage("reroute.notifyWhenBack") var notifyWhenBack: Bool = true
     @AppStorage("reroute.openTerminalDebug") var openTerminalDebug: Bool = true
