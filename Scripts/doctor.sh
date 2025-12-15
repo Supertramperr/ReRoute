@@ -32,7 +32,7 @@ xcodebuild -project "$PROJ_DIR" -scheme "$SCHEME" -destination "platform=macOS" 
 echo
 
 echo "== Grep for old folder name/path (should be empty or only backup scripts) =="
-grep -RIn --exclude-dir=Build --exclude-dir=DerivedData --exclude-dir=.git "RouterRebootMenubar|/Users/sunkeynar/Documents/RouterRebootMenubar" . || true
+grep -RIn --exclude-dir=Build --exclude-dir=DerivedData --exclude-dir=.git "ReRoute|/Users/sunkeynar/Documents/ReRoute" . || true
 echo
 
 echo "== Quick secret scan (tracked) =="

@@ -20,7 +20,7 @@ final class AppLog {
         let out = "\(stamp) \(line)\n"
         if let data = out.data(using: .utf8) {
             if let fh = try? FileHandle(forWritingTo: url) {
-                try? fh.seekToEnd()
+                _ = try? fh.seekToEnd()
                 try? fh.write(contentsOf: data)
                 try? fh.close()
             }
