@@ -1,28 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 echo "== PWD =="; pwd; echo
 
-echo "== Project listing =="
-if ls *.xcodeproj >/dev/null 2>&1; then
-  PROJ="$(ls -1 *.xcodeproj | head -n1)"
-  xcodebuild -list -project "$PROJ"
-else
-  echo "No .xcodeproj found in repo root."
+echo "== Detecting Xcode project =="
+PROJ_DIR="$(find . -maxdepth 1 -type d -name '*.xcodeproj' -print | sort | head -n1 | sed 's|^\./||')"
+if [[ -z "${PROJ_DIR:-}" ]]; then
+  echo "ERROR: No *.xcodeproj directory found at repo root."
+  echo "Repo root entries:"; ls -la
+  exit 1
 fi
+echo "Project: $PROJ_DIR"
+echo
+
+echo "== Project listing =="
+xcodebuild -list -project "$PROJ_DIR"
+echo
+
+SCHEME="$(xcodebuild -list -project "$PROJ_DIR" | awk '/Schemes:/{f=1;next} f && NF{print $1; exit}')"
+if [[ -z "${SCHEME:-}" ]]; then
+  SCHEME="$(basename "$PROJ_DIR" .xcodeproj)"
+fi
+echo "Scheme: $SCHEME"
 echo
 
 echo "== Clean build =="
-if [[ -n "${PROJ:-}" ]]; then
-  SCHEME="$(xcodebuild -list -project "$PROJ" | sed -n 's/^    Schemes:$/__SCHEMES__/p;/^        /p' | awk 'NR==1{next} NR==2{print $0}' | xargs || true)"
-  # fallback if parsing fails
-  [[ -n "$SCHEME" ]] || SCHEME="$(basename "$PROJ" .xcodeproj)"
-  xcodebuild -project "$PROJ" -scheme "$SCHEME" -destination "platform=macOS" -configuration Debug clean build
-else
-  echo "Skipping build (no .xcodeproj)."
-fi
+xcodebuild -project "$PROJ_DIR" -scheme "$SCHEME" -destination "platform=macOS" -configuration Debug clean build
 echo
 
 echo "== Grep for old folder name/path (should be empty or only backup scripts) =="
