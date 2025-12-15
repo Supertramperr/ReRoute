@@ -34,3 +34,4 @@ Sources/**/*.restored*
 Sources/**/*.cookies
 Sources/**/run.log
 cleanup-report-*.txt
+Scripts/
