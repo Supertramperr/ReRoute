@@ -41,3 +41,16 @@ macOS menu bar app for rebooting a router + showing status/progress.
 ## Security note (2025-12-15)
 - Removed hardcoded defaults for router username/password in `Sources/AppModel.swift`.
 - Credentials must be entered via Settings (stored via AppStorage).
+
+## Working agreement (for future ChatGPT sessions)
+- Always make changes via a single bash snippet that:
+  1) creates a timestamped backup under `Sources/_backups/<timestamp>-<topic>/`
+  2) applies edits
+  3) runs `xcodebuild` and relaunches the app
+- If build fails, revert by copying from the last backup folder and rebuilding.
+
+## Quick rollback recipes
+### Roll back a single file from a backup folder
+Example:
+  cp "Sources/_backups/<timestamp>-<topic>/RootMenuView.swift" "Sources/Views/RootMenuView.swift"
+  xcodebuild -project ReRoute.xcodeproj -scheme ReRoute -destination "platform=macOS" -configuration Debug build
