@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$HOME/Documents/RouterRebootMenubar"
+cd "$HOME/Documents/ReRoute"
 cp -f "Sources/_backups/20251215-094404-glasspanel/RootMenuView.swift" "Sources/Views/RootMenuView.swift"
 cp -f "Sources/_backups/20251215-094404-glasspanel/MoreView.swift" "Sources/Views/MoreView.swift"
 if [ -f "Sources/_backups/20251215-094404-glasspanel/GlassPanel.swift" ]; then

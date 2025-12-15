@@ -2,72 +2,78 @@ import SwiftUI
 import AppKit
 
 struct AboutView: View {
-    @StateObject private var windowRef = WindowReference()
+        private let contentYOffset: CGFloat = -100
+
+@StateObject private var windowRef = WindowReference()
 
     private let cornerRadius: CGFloat = 20
+    private let contentPadding = EdgeInsets(top: 8, leading: 16, bottom: 14, trailing: 16)
 
-    // Adjust About window size here
-    private let windowSize = CGSize(width: 280, height: 280)
+    private var versionString: String {
+        let v = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "1.0"
+        return "Version \(v)"
+    }
 
     var body: some View {
         ZStack {
-            WindowAccessor { w in windowRef.window = w }
+            WindowAccessor { w in
+                windowRef.window = w
+            }
 
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(liquidGlassRim)
 
-            VStack(spacing: 10) {
-                // Title row (traffic lights + title)
+            VStack(alignment: .leading, spacing: 12) {
+                // Header row (same styling as Settings)
                 HStack(spacing: 10) {
-                    TrafficLights(window: { windowRef.window }, closeAction: closeWindow)
+                    TrafficLights(
+                        window: { windowRef.window },
+                        closeAction: closeWindow
+                    )
 
-                    Text("About ReRoute")
-                        .font(.headline)
+                    Text("About")
+                        .font(.title3)
                         .fontWeight(.semibold)
 
                     Spacer()
                 }
                 .padding(.top, 2)
 
-                Spacer(minLength: 2)
+                Divider().opacity(0.5)
 
                 // Centered content
                 VStack(spacing: 10) {
-                    Image(systemName: "wifi.router")
-                        .font(.system(size: 46, weight: .semibold))
-                        .opacity(0.92)
+                    AboutLogoMark()
+                        .frame(width: 64, height: 64)
+                        .accessibilityHidden(true)
 
                     Text("ReRoute")
-                        .font(.system(size: 18, weight: .semibold)) // keep current size intent
+                        .font(.system(size: 22, weight: .semibold))
 
                     Text("⌘R Reboot · ⌘, Settings · ⌘L Log")
-                        .font(.system(size: 11))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
                         .opacity(0.78)
 
-                    Text("Version \(appVersionString())")
-                        .font(.system(size: 11))
+                    Text(versionString)
+                        .font(.system(size: 12, weight: .regular))
                         .opacity(0.72)
-                        .padding(.top, 2)
 
                     Text("Copyright © Sun Keynar")
-                        .font(.system(size: 11))
-                        .opacity(0.72)
+                        .font(.system(size: 12, weight: .regular))
+                        .opacity(0.70)
                 }
-                .frame(maxWidth: .infinity, alignment: .center)
-
-                Spacer(minLength: 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .padding(.top, 2)
             }
-            .padding(14)
+            .padding(contentPadding)
         }
-        .frame(width: windowSize.width, height: windowSize.height, alignment: .topLeading)
         .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .onAppear { DispatchQueue.main.async { windowRef.window?.makeFirstResponder(nil) } }
-    }
-
-    private func appVersionString() -> String {
-        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return v ?? "1.0"
+        .onAppear {
+            DispatchQueue.main.async {
+                windowRef.window?.makeFirstResponder(nil)
+            }
+        }
     }
 
     private func closeWindow() {
@@ -108,20 +114,35 @@ struct AboutView: View {
     }
 }
 
-private final class WindowReference: ObservableObject { weak var window: NSWindow? }
+// MARK: - Logo (remove extra wifi icon)
+private struct AboutLogoMark: View {
+    var body: some View {
+        Image(systemName: "wifi.router")
+            .font(.system(size: 40, weight: .semibold))
+            .opacity(0.95)
+    }
+}
+
+// MARK: - Window plumbing (same approach as Settings)
+private final class WindowReference: ObservableObject {
+    weak var window: NSWindow?
+}
 
 private struct WindowAccessor: NSViewRepresentable {
     let onResolve: (NSWindow?) -> Void
+
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
         DispatchQueue.main.async { self.onResolve(v.window) }
         return v
     }
+
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async { self.onResolve(nsView.window) }
     }
 }
 
+// MARK: - Traffic lights (match Settings: green disabled)
 private struct TrafficLights: View {
     let window: () -> NSWindow?
     let closeAction: () -> Void
@@ -129,16 +150,28 @@ private struct TrafficLights: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            Light(color: .red, symbol: "xmark", showSymbol: hover) { closeAction() }
-            Light(color: .yellow, symbol: "minus", showSymbol: hover) { window()?.miniaturize(nil) }
+            Light(color: .red, symbol: "xmark", showSymbol: hover) {
+                closeAction()
+            }
 
-            // Grey disabled green (as requested earlier)
+            Light(color: .yellow, symbol: "minus", showSymbol: hover) {
+                window()?.miniaturize(nil)
+            }
+
+            DisabledGreenLight()
+        }
+        .onHover { hover = $0 }
+    }
+
+    private struct DisabledGreenLight: View {
+        var body: some View {
             Circle()
                 .fill(Color.gray.opacity(0.35))
                 .frame(width: 12, height: 12)
-                .overlay(Circle().strokeBorder(Color.black.opacity(0.12), lineWidth: 0.5))
+                .overlay(
+                    Circle().strokeBorder(Color.black.opacity(0.12), lineWidth: 0.5)
+                )
         }
-        .onHover { hover = $0 }
     }
 
     private struct Light: View {
@@ -146,6 +179,7 @@ private struct TrafficLights: View {
         let symbol: String
         let showSymbol: Bool
         let action: () -> Void
+
         var body: some View {
             Button(action: action) {
                 ZStack {
