@@ -38,3 +38,4 @@ Backups/
 cleanup_inventory.json
 *.xcresult
 
+.gitignore.bak.*
