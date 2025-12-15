@@ -37,3 +37,7 @@ macOS menu bar app for rebooting a router + showing status/progress.
 
 ## TODO / next improvements
 - (Fill in as you go)
+
+## Security note (2025-12-15)
+- Removed hardcoded defaults for router username/password in `Sources/AppModel.swift`.
+- Credentials must be entered via Settings (stored via AppStorage).
