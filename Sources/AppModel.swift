@@ -13,7 +13,6 @@ final class AppModel: ObservableObject {
         case idle
         case starting
         case rebooting
-        case verifying
         case failed(String)
 
         var label: String {
@@ -21,14 +20,13 @@ final class AppModel: ObservableObject {
             case .idle: return "Idle"
             case .starting: return "Starting…"
             case .rebooting: return "Rebooting"
-            case .verifying: return "Verifying"
-            case .failed: return "Failed"
+case .failed: return "Failed"
             }
         }
 
         var isBusy: Bool {
             switch self {
-            case .starting, .rebooting, .verifying:
+            case .starting, .rebooting:
                 return true
             default:
                 return false
@@ -128,7 +126,7 @@ final class AppModel: ObservableObject {
             log.write("START (debug=\(debugMode))")
 
             // Grace countdown: 5..1. No progress movement here.
-            await graceCountdown(seconds: startingGraceSeconds)
+            try try await graceCountdown(seconds: startingGraceSeconds)
             try Task.checkCancellation()
 
             let host = routerHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -166,7 +164,6 @@ final class AppModel: ObservableObject {
             }
 
             startLinearProgress(from: postAt)
-
             log.write("monitoring ping+wan")
             let result = try await monitorReboot(host: host)
 
@@ -227,7 +224,7 @@ final class AppModel: ObservableObject {
         rebootTask = nil
     }
 
-    private func graceCountdown(seconds: Int) async {
+    private func graceCountdown(seconds: Int) async throws {
         await MainActor.run {
             self.operation = .starting
             self.startingCountdown = seconds
@@ -239,8 +236,8 @@ final class AppModel: ObservableObject {
         guard seconds > 0 else { return }
 
         for remaining in stride(from: seconds, to: 0, by: -1) {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            if Task.isCancelled { return }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            if Task.isCancelled { throw CancellationError() }
             await MainActor.run {
                 self.startingCountdown = max(0, remaining - 1)
                 self.touch()
@@ -248,22 +245,33 @@ final class AppModel: ObservableObject {
         }
     }
 
+
     private func startLinearProgress(from start: Date) {
         progressTask?.cancel()
         let total = max(30.0, min(240.0, estimatedRebootSeconds))
+        let maxWait = 240.0
 
         progressTask = Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
 
             while !Task.isCancelled {
                 let elapsed = Date().timeIntervalSince(start)
-                // Fill linearly, but cap at 95% until we truly confirm completion.
-                let p = min(max(elapsed / total, 0), 0.95)
+
+                // Phase 1: 0% -> 95% over the estimated duration.
+                // Phase 2: 95% -> 99% over the remaining maxWait window (so it never "stalls" visually).
+                let p: Double
+                if elapsed <= total {
+                    let r = min(max(elapsed / total, 0), 1)
+                    p = r * 0.95
+                } else {
+                    let tail = max(1.0, maxWait - total)
+                    let r = min(max((elapsed - total) / tail, 0), 1)
+                    p = 0.95 + r * 0.04
+                }
 
                 await MainActor.run {
-                    // Only update while we're in the run states
                     if self.operation.isBusy {
-                        self.progress = p
+                        self.progress = min(max(p, 0), 0.99)
                         self.touch()
                     }
                 }
@@ -272,6 +280,7 @@ final class AppModel: ObservableObject {
             }
         }
     }
+
 
     private struct MonitorResult {
         let routerDown: Bool
@@ -313,8 +322,7 @@ private func monitorReboot(host: String) async throws -> MonitorResult {
             if routerDown && !routerUp && rOK {
                 routerUp = true
                 log.write("ROUTER_UP at i=\(i)")
-                await MainActor.run { self.operation = .verifying; self.touch() }
-            }
+}
 
             // WAN probe
             let wOK = await wanIsUp()
@@ -327,8 +335,8 @@ private func monitorReboot(host: String) async throws -> MonitorResult {
                 log.write("WAN_UP at i=\(i)")
             }
 
-            if routerUp && wanUp {
-                log.write("DONE (confirmed=true) routerUp=true wanUp=true")
+            if routerDown && routerUp && wanUp {
+                log.write("DONE (confirmed=true) routerDown=true routerUp=true wanUp=true")
                 return MonitorResult(routerDown: routerDown, routerUp: routerUp, wanDown: wanDown, wanUp: wanUp)
             }
 
@@ -410,9 +418,7 @@ private func monitorReboot(host: String) async throws -> MonitorResult {
             return "hourglass"
         case .rebooting:
             return "arrow.clockwise"
-        case .verifying:
-            return "antenna.radiowaves.left.and.right"
-        case .failed:
+case .failed:
             return "exclamationmark.triangle"
         case .idle:
             return internet == .online ? "wifi" : "wifi.slash"

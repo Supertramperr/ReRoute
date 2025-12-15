@@ -86,42 +86,127 @@ final class RouterClient {
         throw RouterError.authKeyNotFound
     }
 
+
+
+
     func reboot(host: String, sessionKey: String) async throws {
         let base = "http://\(host)"
-        guard let url = URL(string: "\(base)/rebootinfo.cgi?sessionKey=\(sessionKey)") else {
-        graceLog("POST rebootinfo")
+
+        guard let rebootURL = URL(string: "\(base)/rebootinfo.cgi?sessionKey=\(sessionKey)") else {
             throw NSError(domain: "ReRoute", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid reboot URL"])
         }
 
-        var req = URLRequest(url: url)
+        graceLog("POST rebootinfo.cgi")
+
+        var req = URLRequest(url: rebootURL)
         req.httpMethod = "POST"
-        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.cachePolicy = URLRequest.CachePolicy.reloadIgnoringLocalCacheData
         req.timeoutInterval = 15
 
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        req.setValue("\(base)/securite-pb1-motdepasse.html", forHTTPHeaderField: "Referer")
+        // Important: include sessionKey in referer (matches what these firmwares expect)
+        req.setValue("\(base)/securite-pb1-motdepasse.html?sessionKey=\(sessionKey)", forHTTPHeaderField: "Referer")
         req.setValue(base, forHTTPHeaderField: "Origin")
         req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
         req.setValue("ReRoute", forHTTPHeaderField: "User-Agent")
 
-        let body = "sessionKey=\(sessionKey)"
-        req.httpBody = body.data(using: .utf8)
+        req.httpBody = "sessionKey=\(sessionKey)".data(using: .utf8)
 
-        let (data, resp) = try await session.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-        let text = String(data: data, encoding: .utf8) ?? ""
-        let head = String(text.prefix(240))
+        let (data, r) = try await session.data(for: req)
+        guard let resp = r as? HTTPURLResponse else { throw RouterError.httpStatus(0) }
 
-        // Router often returns 200 with HTML that triggers reboot.
-        // But if we're not authenticated, it typically returns the login form (also 200).
-        let lower = text.lowercased()
-        if code != 200 {
-            throw NSError(domain: "ReRoute", code: code, userInfo: [NSLocalizedDescriptionKey: "rebootinfo.cgi http=\(code) head=\(head)"])
+        let text = decodeHTML(data)
+        let head = String(text.prefix(260))
+        graceLog("rebootinfo http=\(resp.statusCode) head=\(head)")
+
+        if resp.statusCode != 200 {
+            throw NSError(domain: "ReRoute", code: resp.statusCode,
+                          userInfo: [NSLocalizedDescriptionKey: "rebootinfo.cgi http=\(resp.statusCode) head=\(head)"])
         }
+
+        // If we got the login page back, reboot wasn't accepted.
+        let lower = text.lowercased()
         if lower.contains("postlogin.cgi") || lower.contains("loginusername") || lower.contains("value=\"login\"") {
-            throw NSError(domain: "ReRoute", code: -2, userInfo: [NSLocalizedDescriptionKey: "reboot rejected (got login page). head=\(head)"])
+            throw NSError(domain: "ReRoute", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "reboot rejected (got login page). head=\(head)"])
+        }
+
+        // Some firmwares require a follow-up hit on reboot.cgi referenced in the returned HTML/JS.
+        func normalizeCandidate(_ raw: String) -> URL? {
+            let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.isEmpty { return nil }
+
+            let abs: String
+            if t.lowercased().hasPrefix("http") { abs = t }
+            else if t.hasPrefix("/") { abs = base + t }
+            else { abs = base + "/" + t }
+
+            guard var u = URL(string: abs) else { return nil }
+
+            let hasKey = URLComponents(url: u, resolvingAgainstBaseURL: false)?
+                .queryItems?
+                .contains(where: { $0.name.lowercased() == "sessionkey" }) ?? false
+
+            if !hasKey {
+                var c = URLComponents(url: u, resolvingAgainstBaseURL: false)
+                var items = c?.queryItems ?? []
+                items.append(URLQueryItem(name: "sessionKey", value: sessionKey))
+                c?.queryItems = items
+                if let nu = c?.url { u = nu }
+            }
+            return u
+        }
+
+        var candidates: [URL] = []
+
+        if let re = try? NSRegularExpression(pattern: #"reboot\.cgi[^'"<\s]*"#, options: [.caseInsensitive]) {
+            let ns = text as NSString
+            let range = NSRange(location: 0, length: ns.length)
+            for m in re.matches(in: text, options: [], range: range) {
+                let raw = ns.substring(with: m.range)
+                if let u = normalizeCandidate(raw) { candidates.append(u) }
+            }
+        }
+
+        // Hard fallbacks
+        if let u = normalizeCandidate("/reboot.cgi?sessionKey=\(sessionKey)") { candidates.append(u) }
+        if let u = normalizeCandidate("/reboot.cgi") { candidates.append(u) }
+
+        // de-dup preserving order
+        var seen = Set<String>()
+        candidates = candidates.filter { seen.insert($0.absoluteString).inserted }
+
+        for u in candidates {
+            // Try POST first (closest to what router UIs do)
+            do {
+                graceLog("TRIGGER POST \(u.path)")
+                var r = URLRequest(url: u)
+                r.httpMethod = "POST"
+                r.cachePolicy = URLRequest.CachePolicy.reloadIgnoringLocalCacheData
+                r.timeoutInterval = 6
+                r.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                r.setValue(rebootURL.absoluteString, forHTTPHeaderField: "Referer")
+                r.setValue(base, forHTTPHeaderField: "Origin")
+                r.httpBody = "sessionKey=\(sessionKey)".data(using: .utf8)
+                _ = try await session.data(for: r)
+            } catch { }
+
+            // Then GET as a fallback
+            do {
+                graceLog("TRIGGER GET \(u.path)")
+                var r = URLRequest(url: u)
+                r.httpMethod = "GET"
+                r.cachePolicy = URLRequest.CachePolicy.reloadIgnoringLocalCacheData
+                r.timeoutInterval = 6
+                r.setValue(rebootURL.absoluteString, forHTTPHeaderField: "Referer")
+                r.setValue(base, forHTTPHeaderField: "Origin")
+                _ = try await session.data(for: r)
+            } catch { }
         }
     }
+
+
+
 
     func waitForDown(host: String, timeoutSeconds: Int, onProgress: @escaping (Double) -> Void) async throws -> Bool {
         let start = Date()
