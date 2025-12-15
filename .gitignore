@@ -35,3 +35,6 @@ Sources/**/*.cookies
 Sources/**/run.log
 cleanup-report-*.txt
 Scripts/
+Backups/
+cleanup_inventory.json
+*.xcresult
